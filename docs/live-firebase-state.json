@@ -1,0 +1,13 @@
+{
+  "project": "barangay-survey-1cc7d",
+  "database": "(default)",
+  "capturedAt": "2026-11-11T01:04:12.488Z",
+  "rulesReleased": true,
+  "rulesSourceMatchesLocal": true,
+  "rulesSha256": "4e64b39e6a908d180066e8277ea16b570e2bcec3dc925e98f9c72175d7293b03",
+  "indexCount": 29,
+  "indexStates": {
+    "READY": 29
+  },
+  "authUsers": 7
+}

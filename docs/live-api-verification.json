@@ -1,0 +1,13 @@
+{
+  "project": "barangay-survey-1cc7d",
+  "kind": "Authorized custom-token API/read smoke; not password-login proof",
+  "checks": 28,
+  "roles": {
+    "resident": 4,
+    "admin": 1,
+    "staff": 2
+  },
+  "skippedDisabled": 0,
+  "firestoreWrites": 0,
+  "capturedAt": "2026-11-11T01:03:29.591Z"
+}
