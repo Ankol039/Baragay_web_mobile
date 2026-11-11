@@ -1,0 +1,52 @@
+{
+  "name": "barangay-resident",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@react-native-picker/picker": "2.11.4",
+    "@react-navigation/bottom-tabs": "^7.21.0",
+    "@react-navigation/native": "^7.5.1",
+    "@react-navigation/native-stack": "^7.21.0",
+    "expo": "~58.0.23",
+    "expo-crypto": "~58.0.7",
+    "expo-file-system": "~58.0.13",
+    "expo-image-manipulator": "~58.0.16",
+    "expo-image-picker": "~58.0.10",
+    "expo-print": "~58.0.8",
+    "expo-sharing": "~58.0.22",
+    "expo-status-bar": "~58.0.4",
+    "firebase": "^13.2.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-safe-area-context": "~5.11.1",
+    "react-native-screens": "~4.30.1",
+    "react-native-web": "^0.21.4"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "lint": "eslint .",
+    "build": "expo export --platform all",
+    "build:web": "expo export --platform web",
+    "test": "node --test tests/*.test.mjs",
+    "doctor": "npx expo-doctor",
+    "demo:emulators": "node scripts/demo.mjs",
+    "lan:emulators": "node scripts/lan-gateway.mjs",
+    "lan:live": "node scripts/lan-gateway.mjs --real",
+    "native:emulators": "node scripts/native-demo.mjs",
+    "test:emulators": "node tests/resident-browser.mjs",
+    "build:demo": "node scripts/demo.mjs --build-only"
+  },
+  "private": true,
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.14.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.14.0"
+  },
+  "type": "module"
+}
