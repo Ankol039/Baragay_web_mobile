@@ -1,0 +1,22 @@
+{
+  "name": "barangay-firebase-migration",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "migrate": "node src/cli.mjs",
+    "dry-run": "node src/cli.mjs all --dry-run",
+    "emulator:dry-run": "node ../frontend/node_modules/firebase-tools/lib/bin/firebase.js emulators:exec --config ../firebase.json --only auth,firestore \"node src/cli.mjs all --dry-run --check-idempotency\"",
+    "test": "node --test tests/*.test.mjs",
+    "lint": "../frontend/node_modules/.bin/oxlint --deny-warnings src tests",
+    "build": "node src/check-syntax.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "^14.5.0",
+    "mysql2": "^3.24.6",
+    "sharp": "^0.35.5"
+  }
+}

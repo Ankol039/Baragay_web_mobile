@@ -1,0 +1,372 @@
+rules_version = '2';
+// Final client boundary: account/survey management and review writes are trusted-API-only.
+// Clients retain owner contact/proposal writes and validated response transactions.
+// Prototype model: docs/firebase-migration.md, section "Firestore data model".
+// All fields listed by validators are required; nullable values use explicit null.
+// users/{uid}: role/lifecycle authority, identifier/username/displayName, timestamps,
+//   archive stamps and legacyId; optional trusted selfRegistered boolean.
+//   Only trusted auth bridge may clear own onboarding or mark self-registration.
+// residents/{uid}: typed name/contact/address/household maps, dates, residency/category;
+//   optional photoDataUrl: JPEG data URL <=81943 characters (60 KiB bytes), bridge writes only.
+//   children/{id}, characterReferences/{id}: typed person, order, createdAt, legacyId.
+// staff/{uid}: typed employment/contact/address/emergency maps, dates and legacyId;
+//   optional bounded photoDataUrl uses the same trusted image policy as residents.
+// profileImages/{uid}: migrated resident fallback/staff; ownerUid, JPEG base64 <=128 KiB, updatedAt (no Storage).
+// surveys/{id}: title/description/status, date-only timestamps, creator, legacyId.
+//   questions/{id}: text/type/order/legacyId; choices/{id}: text/order/legacyId.
+//   validation/response: trusted surveyVersion, firstRequiredId, requiredNext map.
+//   Every question mutation advances survey.updatedAt, invalidating that metadata.
+// responses/{surveyId_uid}: survey/resident IDs, title snapshot, firstAnswerId,
+//   submittedAt/legacyId. answers/{questionId}: typed immutable answer + text snapshot,
+//   with submittedAt proving each required answer is new in this same commit.
+// nameAddressRequests, familyRequests, staffRequests, deletionRequests: immutable
+//   typed proposals, pending -> approved/rejected reviewer stamps; family person
+//   rows are subcollections, not unvalidated arrays. pendingRequests serializes them.
+// residencyRecords/{id}: admin-only transition, old address snapshots, actor/time.
+// counters/{residentNumbers|staffNumbers}: atomic +1 tied to new user/profile.
+// identifierAliases and loginHistory: trusted bridge writes only; no client aliases.
+// UID/createdAt/legacyId immutable on updates; all other paths denied.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signed() { return request.auth != null; }
+    function owner(uid) { return signed() && request.auth.uid == uid; }
+    function userPath(uid) { return /databases/$(database)/documents/users/$(uid); }
+    function me() { return get(userPath(request.auth.uid)).data; }
+    function unlocked() { return !exists(/databases/$(database)/documents/accountLocks/$(request.auth.uid)); }
+    function active() { let u = me(); return signed() && unlocked() && u.isActive && u.deletedAt == null; }
+    function eligible(u) { return signed() && unlocked() && u.isActive && u.deletedAt == null && !u.isFirstLogin && u.profileCompleted; }
+    function ready() { return eligible(me()); }
+    function worker() { let u = me(); return eligible(u) && u.role in ['staff', 'admin']; }
+    function admin() { let u = me(); return eligible(u) && u.role == 'admin'; }
+    function resident() { let u = me(); return eligible(u) && u.role == 'resident'; }
+    function fields(d, names) { return d.keys().hasAll(names) && d.keys().hasOnly(names); }
+    // Unchanged maps were validated on creation. Avoid repeating their full
+    // validation in multi-document reviews/transitions (1000-expression budget).
+    function sameField(d, key) { return resource != null && key in resource.data && d[key] == resource.data[key]; }
+    function str(s, max) { return s is string && s.size() <= max; }
+    function ident(s) { return str(s, 128) && s.matches('^[A-Za-z0-9_-]{1,128}$'); }
+    function nullableId(s) { return s == null || ident(s); }
+    function legacy(n) { return n == null || (n is int && n > 0); }
+    function date(d) { return d is timestamp && d == d.date(); }
+    function optionalDate(d) { return d == null || date(d); }
+    function today() { return (request.time + duration.value(8, 'h')).date(); }
+    function contact(d) {
+      return d is map && fields(d, ['email', 'number']) && (d.email is string && d.email.size() <= 100)
+        && (d.email == '' || d.email.matches('^[^ @]+@[^ @]+[.][^ @]+$'))
+        && (d.number is string && d.number.size() <= 20) && (d.number == '' || d.number.matches('^[0-9+() -]{7,20}$'));
+    }
+    // Resident PHP saves email as entered; the form supplies email validity.
+    // Its optional contact number permits PHP whitespace as well as punctuation.
+    function residentContact(d) {
+      return d is map && fields(d, ['email', 'number']) && str(d.email, 100) && str(d.number, 20)
+        && (d.email != '' || d.number != '') && (d.number == '' || d.number.matches('^[0-9+()\\s-]{7,20}$'));
+    }
+    function person(d, required) {
+      return d is map && fields(d, ['courtesyTitle', 'firstName', 'middleName', 'lastName', 'nameExtension', 'gender'])
+        && (d.courtesyTitle is string && d.courtesyTitle.size() <= 20) && (d.firstName is string && d.firstName.size() <= 50) && (d.middleName is string && d.middleName.size() <= 50)
+        && (d.lastName is string && d.lastName.size() <= 50) && (d.nameExtension is string && d.nameExtension.size() <= 20)
+        && d.gender in ['', 'man', 'woman', 'non_binary', 'prefer_not_to_say']
+        && (!required || (d.firstName.size() > 0 && d.lastName.size() > 0));
+    }
+    function optionalPerson(d) { return d == null || person(d, false); }
+    function address(d) {
+      return d is map && fields(d, ['householdNumber', 'purok', 'streetHighway', 'barangay', 'municipality', 'postalCode', 'province', 'displayLine'])
+        && (d.householdNumber is string && d.householdNumber.size() <= 50) && (d.purok is string && d.purok.size() <= 100) && (d.streetHighway is string && d.streetHighway.size() <= 150)
+        && (d.barangay is string && d.barangay.size() <= 100) && (d.municipality is string && d.municipality.size() <= 100) && (d.province is string && d.province.size() <= 100)
+        && (d.postalCode is string && d.postalCode.size() <= 10) && (d.postalCode == '' || d.postalCode.matches('^[0-9]{4}$'))
+        && (d.displayLine is string && d.displayLine.size() <= 255);
+    }
+    function optionalAddress(d) { return d == null || address(d); }
+    function household(d) {
+      return d is map && fields(d, ['occupation', 'hotlineNumber', 'isMarried', 'hasChildren', 'spouse', 'father', 'mother'])
+        && (d.occupation is string && d.occupation.size() <= 100) && (d.hotlineNumber is string && d.hotlineNumber.size() <= 30)
+        && d.isMarried is bool && d.hasChildren is bool && optionalPerson(d.spouse)
+        && optionalPerson(d.father) && optionalPerson(d.mother) && (d.isMarried || d.spouse == null);
+    }
+    match /users/{uid} {
+      allow read: if owner(uid) || (worker() && (me().role == 'admin' || resource.data.role == 'resident'));
+      allow create: if false;
+      // Clearing one's own onboarding is intentionally bridge-only: rules cannot prove an Auth password change.
+      allow update: if false;
+      allow delete: if false;
+    }
+    match /counters/{name} {
+      allow read: if worker() && (name == 'residentNumbers' || (name == 'staffNumbers' && admin()));
+      allow create: if false;
+      allow update: if false;
+      allow delete: if false;
+    }
+    function validResident(d, uid) {
+      let keys = ['uid', 'name', 'contact', 'birthdate', 'birthplace', 'permanentAddress', 'temporaryAddress',
+          'residencyStatus', 'residencyStartDate', 'residenceType', 'specialCategory', 'categoryReference', 'household',
+          'lastResidencyRecordId', 'createdAt', 'updatedAt', 'legacyId'];
+      return d.keys().hasAll(keys) && d.keys().hasOnly(keys.concat(['photoDataUrl']))
+        && (!('photoDataUrl' in d) || (d.photoDataUrl is string && d.photoDataUrl.size() <= 81943
+          && (d.photoDataUrl == '' || d.photoDataUrl.matches('^data:image/jpeg;base64,/9j/[A-Za-z0-9+/]*={0,2}$'))))
+        && d.uid == uid && (sameField(d, 'name') || person(d.name, true))
+        && (sameField(d, 'contact') || contact(d.contact) || residentContact(d.contact)) && optionalDate(d.birthdate)
+        && (d.birthdate == null || d.birthdate <= today()) && (d.birthplace is string && d.birthplace.size() <= 150)
+        && (sameField(d, 'permanentAddress') || address(d.permanentAddress))
+        && (sameField(d, 'temporaryAddress') || optionalAddress(d.temporaryAddress))
+        && d.residencyStatus in ['permanent', 'temporary'] && date(d.residencyStartDate) && d.residencyStartDate <= today()
+        && (d.birthdate == null || d.residencyStartDate >= d.birthdate)
+        && d.residenceType in ['', 'AR', 'DR', 'BH', 'BS', 'RL', 'TR']
+        && (d.residencyStatus == 'temporary' || (d.temporaryAddress == null && d.residenceType == ''))
+        && d.specialCategory in ['none', 'pwd', 'senior_citizen', 'pregnant'] && (d.categoryReference is string && d.categoryReference.size() <= 60)
+        && (d.specialCategory != 'none' || d.categoryReference == '')
+        && (sameField(d, 'household') || household(d.household))
+        && nullableId(d.lastResidencyRecordId) && d.createdAt is timestamp && d.updatedAt is timestamp && legacy(d.legacyId);
+    }
+    function residentParent(uid) {
+      return exists(/databases/$(database)/documents/residents/$(uid)) && exists(userPath(uid));
+    }
+    function profileLive(uid) { return get(userPath(uid)).data.deletedAt == null; }
+    function profileAccess(uid) { return worker() || (resident() && owner(uid) && profileLive(uid)); }
+    function validPersonRow(d) {
+      return fields(d, ['person', 'displayOrder', 'createdAt', 'legacyId']) && person(d.person, true)
+        && d.displayOrder is int && d.displayOrder >= 0 && d.displayOrder <= 2147483647
+        && d.createdAt is timestamp && legacy(d.legacyId);
+    }
+    match /residents/{uid} {
+      allow read: if profileAccess(uid);
+      allow create: if false;
+      allow update: if resident() && owner(uid) && profileLive(uid)
+        && validResident(request.resource.data, uid) && residentContact(request.resource.data.contact)
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['contact', 'updatedAt']);
+      allow delete: if false;
+      match /{people}/{personId} {
+        allow read: if people in ['children', 'characterReferences'] && residentParent(uid) && profileAccess(uid);
+        allow create: if false;
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+    match /staff/{uid} {
+      allow read: if admin() || (active() && owner(uid) && me().role in ['staff', 'admin']);
+      allow create: if false;
+      allow update: if false;
+      allow delete: if false;
+    }
+    match /profileImages/{uid} {
+      allow read: if active() && (owner(uid) || (worker() && get(userPath(uid)).data.role == 'resident') || admin());
+      allow create, update: if false;
+      allow delete: if false;
+    }
+    function open(d) { return d.status == 'active' && d.startDate <= today() && d.endDate >= today(); }
+    function surveyPath(sid) { return /databases/$(database)/documents/surveys/$(sid); }
+    function surveyAccess(sid) { return exists(surveyPath(sid)) && (worker() || (resident() && open(get(surveyPath(sid)).data))); }
+    match /surveys/{sid} {
+      allow read: if worker() || (resident() && open(resource.data));
+      allow create: if false;
+      allow update: if false;
+      // Firestore does not cascade. The verified API closes, marks and pages cleanup.
+      allow delete: if false;
+      match /validation/{id} {
+        allow read: if id == 'response' && surveyAccess(sid);
+        // Required membership is derived from all questions by the trusted bridge.
+        allow write: if false;
+      }
+      match /questions/{qid} {
+        allow read: if surveyAccess(sid);
+        allow create: if false;
+        allow update: if false;
+        allow delete: if false;
+        match /choices/{cid} {
+          allow read: if surveyAccess(sid) && exists(/databases/$(database)/documents/surveys/$(sid)/questions/$(qid));
+          allow create: if false;
+          allow update: if false;
+          allow delete: if false;
+        }
+      }
+    }
+    function responsePath(rid) { return /databases/$(database)/documents/responses/$(rid); }
+    function responseSchema(sid) { return get(/databases/$(database)/documents/surveys/$(sid)/validation/response).data; }
+    function answerProof(rid, qid) {
+      let answer = qid == '' ? {} : getAfter(/databases/$(database)/documents/responses/$(rid)/answers/$(qid)).data;
+      return qid == '' || (answer.questionId == qid && answer.submittedAt == request.time);
+    }
+    function requiredProof(sid, rid) {
+      let schema = responseSchema(sid);
+      return schema.surveyVersion == get(surveyPath(sid)).data.updatedAt && answerProof(rid, schema.firstRequiredId);
+    }
+    function nextRequiredProof(sid, rid, qid) {
+      let required = responseSchema(sid).requiredNext;
+      return !(qid in required) || answerProof(rid, required[qid]);
+    }
+    function responseRead(d) { return worker() || (resident() && d.residentUid == request.auth.uid); }
+    function validResponse(d, rid) {
+      return fields(d, ['surveyId', 'residentUid', 'surveyTitle', 'firstAnswerId', 'submittedAt', 'legacyId'])
+        && d.surveyId.matches('^[A-Za-z0-9-]{1,128}$') && ident(d.residentUid) && ident(d.firstAnswerId)
+        && rid == d.surveyId + '_' + d.residentUid && (d.surveyTitle is string && d.surveyTitle.size() <= 150)
+        && d.submittedAt == request.time && d.legacyId == null;
+    }
+    function validAnswer(d, qid) {
+      return fields(d, ['questionId', 'type', 'questionText', 'choiceId', 'choiceText', 'rating', 'text', 'order', 'legacyId', 'submittedAt'])
+        && d.questionId == qid && ident(qid) && (d.questionText is string && d.questionText.size() <= 255) && (d.choiceText is string && d.choiceText.size() <= 150)
+        && (d.text is string && d.text.size() <= 20000) && nullableId(d.choiceId) && (d.rating == null || (d.rating is int && d.rating >= 1 && d.rating <= 5))
+        && d.order is int && d.order >= 0 && d.order <= 2147483647 && d.legacyId == null && d.submittedAt == request.time
+        && ((d.type == 'multiple_choice' && d.choiceId != null && d.rating == null && d.text == '')
+          || (d.type == 'rating' && d.choiceId == null && d.choiceText == '' && d.rating != null && d.text == '')
+          || (d.type == 'yesno' && d.choiceId == null && d.choiceText == '' && d.rating == null && d.text in ['Yes', 'No'])
+          || (d.type == 'short_answer' && d.choiceId == null && d.choiceText == '' && d.rating == null
+            && d.text.matches('(?s).*[^ \\t\\n\\r\\x00\\x0B].*')));
+    }
+    match /responses/{rid} {
+      // Own deterministic missing IDs can return NOT_FOUND for the preflight check.
+      allow read: if worker() || (resident() && (resource == null
+        ? rid.matches('^[A-Za-z0-9-]{1,128}_' + request.auth.uid + '$')
+        : resource.data.residentUid == request.auth.uid));
+      allow create: if resident() && validResponse(request.resource.data, rid) && request.resource.data.residentUid == request.auth.uid
+        && open(get(surveyPath(request.resource.data.surveyId)).data)
+        && request.resource.data.surveyTitle == get(surveyPath(request.resource.data.surveyId)).data.title
+        && requiredProof(request.resource.data.surveyId, rid)
+        && answerProof(rid, request.resource.data.firstAnswerId);
+      allow update: if false;
+      allow delete: if false;
+      match /answers/{qid} {
+        function parent() { return get(responsePath(rid)).data; }
+        function nextParent() { return getAfter(responsePath(rid)).data; }
+        function question() { return get(/databases/$(database)/documents/surveys/$(nextParent().surveyId)/questions/$(qid)).data; }
+        allow read: if exists(responsePath(rid)) && responseRead(parent());
+        // The parent must be NEW in this same atomic commit: no late answers or replays.
+        allow create: if resident() && !exists(responsePath(rid)) && validAnswer(request.resource.data, qid)
+          && nextParent().residentUid == request.auth.uid && nextParent().submittedAt == request.time
+          && rid == nextParent().surveyId + '_' + request.auth.uid && open(get(surveyPath(nextParent().surveyId)).data)
+          && request.resource.data.type == question().type && request.resource.data.questionText == question().text
+          && request.resource.data.order == question().order
+          && nextRequiredProof(nextParent().surveyId, rid, qid)
+          && (request.resource.data.choiceId == null || (get(/databases/$(database)/documents/surveys/$(nextParent().surveyId)/questions/$(qid)/choices/$(request.resource.data.choiceId)).data.text == request.resource.data.choiceText));
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+    function requestPath(kind, id) {
+      return kind == 'nameAddress' ? /databases/$(database)/documents/nameAddressRequests/$(id)
+        : kind == 'family' ? /databases/$(database)/documents/familyRequests/$(id)
+        : kind == 'staff' ? /databases/$(database)/documents/staffRequests/$(id)
+        : /databases/$(database)/documents/deletionRequests/$(id);
+    }
+    function pointerPath(uid, kind) { return /databases/$(database)/documents/pendingRequests/$(uid + '_' + kind); }
+    function requester(d) {
+      return (d.kind in ['nameAddress', 'family'] && resident() && d.ownerUid == request.auth.uid)
+        || (d.kind == 'staff' && ready() && me().role == 'staff' && d.ownerUid == request.auth.uid)
+        || (d.kind == 'deletion' && worker() && get(userPath(d.ownerUid)).data.role == 'resident');
+    }
+    function proposed(d, kind) {
+      return (kind == 'nameAddress' && d is map && fields(d, ['name', 'birthdate', 'permanentAddress', 'temporaryAddress', 'legacyEmail', 'legacyContact', 'legacyBarangaySubdivision'])
+          && optionalPerson(d.name) && optionalDate(d.birthdate) && optionalAddress(d.permanentAddress) && optionalAddress(d.temporaryAddress)
+          && (d.legacyEmail is string && d.legacyEmail.size() <= 100) && (d.legacyContact is string && d.legacyContact.size() <= 20) && (d.legacyBarangaySubdivision is string && d.legacyBarangaySubdivision.size() <= 100)
+          && (d.name != null || d.birthdate != null || d.permanentAddress != null || d.temporaryAddress != null))
+        || (kind == 'family' && household(d))
+        || (kind == 'staff' && address(d))
+        || (kind == 'deletion' && d is map && fields(d, ['residentNumber', 'residentName']) && (d.residentNumber is string && d.residentNumber.size() <= 20) && (d.residentName is string && d.residentName.size() <= 120));
+    }
+    function validRequest(d, kind) {
+      return fields(d, ['kind', 'ownerUid', 'ownerIdentifier', 'ownerDisplayName', 'requestedByUid', 'requestedByName', 'proposed', 'previousAddress', 'reason', 'firstReferenceId',
+          'status', 'requestedAt', 'reviewedAt', 'reviewedByUid', 'reviewedByName', 'reviewComment', 'legacyId'])
+        && d.kind == kind && ident(d.ownerUid) && ident(d.requestedByUid)
+        && (d.ownerIdentifier is string && d.ownerIdentifier.size() <= 20)
+        && (d.ownerDisplayName is string && d.ownerDisplayName.size() <= 120)
+        && (d.requestedByName is string && d.requestedByName.size() <= 120) && proposed(d.proposed, kind)
+        && (d.previousAddress is string && d.previousAddress.size() <= 255) && (d.reason is string && d.reason.size() <= 255) && nullableId(d.firstReferenceId)
+        && (kind != 'family' || d.firstReferenceId != null) && d.status in ['pending', 'approved', 'rejected']
+        && d.requestedAt is timestamp && (d.reviewedAt == null || d.reviewedAt is timestamp)
+        && nullableId(d.reviewedByUid) && (d.reviewedByName is string && d.reviewedByName.size() <= 100) && (d.reviewComment is string && d.reviewComment.size() <= 255) && legacy(d.legacyId);
+    }
+    function createRequest(d, kind, id) {
+      return validRequest(d, kind) && requester(d) && profileLive(d.ownerUid)
+        && d.requestedByUid == request.auth.uid && d.requestedByName == me().displayName
+        && d.ownerIdentifier == get(userPath(d.ownerUid)).data.identifier && d.ownerDisplayName == get(userPath(d.ownerUid)).data.displayName
+        && d.status == 'pending' && d.requestedAt == request.time
+        && d.reviewedAt == null && d.reviewedByUid == null && d.reviewedByName == '' && d.reviewComment == '' && d.legacyId == null
+        && (kind == 'nameAddress' || d.reason.size() > 0)
+        && !exists(pointerPath(d.ownerUid, kind)) && getAfter(pointerPath(d.ownerUid, kind)).data.requestId == id
+        && (kind in ['nameAddress', 'family'] ? singleProfileRequest(d, kind) && profileProposal(d, kind) : true);
+    }
+    // Retain the imported per-kind pointer paths and existing staff review flow,
+    // but serialize all new resident corrections across both slots, even in a batch.
+    function singleProfileRequest(d, kind) {
+      let other = pointerPath(d.ownerUid, kind == 'family' ? 'nameAddress' : 'family');
+      return !exists(other) && !existsAfter(other);
+    }
+    function profileAddress(d, required) {
+      return d == null ? !required : address(d)
+        && d.householdNumber.size() <= 30 && d.purok.size() <= 60 && d.streetHighway.size() <= 120
+        && d.barangay.size() <= 80 && d.municipality.size() <= 80 && d.province.size() <= 80
+        && (!required || (d.householdNumber.size() > 0 && d.barangay.size() > 0 && d.municipality.size() > 0 && d.province.size() > 0));
+    }
+    function profileProposal(d, kind) {
+      let r = get(/databases/$(database)/documents/residents/$(d.ownerUid)).data;
+      let p = d.proposed;
+      return kind == 'family'
+        ? d.reason.matches('.*[^ \\t\\r\\n].*') && (!p.isMarried || (p.spouse != null && p.spouse.firstName.size() > 0))
+          && (p.hotlineNumber == '' || p.hotlineNumber.matches('^((\\(02\\)|02)\\s?8[0-9]{3}[- ]?[0-9]{4}|8[0-9]{3}[- ]?[0-9]{4}|\\(0[0-9]{2,3}\\)\\s?[0-9]{3}[- ]?[0-9]{4}|09[0-9]{2}[- ]?[0-9]{3}[- ]?[0-9]{4})$'))
+        : p.birthdate != null
+          ? p.birthdate < today() && p.birthdate != r.birthdate && p.name == null && p.permanentAddress == null && p.temporaryAddress == null
+          : p.name != null && person(p.name, true) && p.name.gender == r.name.gender && profileAddress(p.permanentAddress, true)
+            && (r.residencyStatus == 'temporary' ? profileAddress(p.temporaryAddress, false) : p.temporaryAddress == null)
+            && (p.name != r.name || p.permanentAddress != r.permanentAddress || p.temporaryAddress != r.temporaryAddress);
+    }
+    match /nameAddressRequests/{id} {
+      allow read: if worker() || (resident() && resource.data.ownerUid == request.auth.uid);
+      allow create: if ident(id) && createRequest(request.resource.data, 'nameAddress', id);
+      allow update: if false;
+      allow delete: if false;
+    }
+    match /familyRequests/{id} {
+      allow read: if worker() || (resident() && resource.data.ownerUid == request.auth.uid);
+      allow create: if ident(id) && createRequest(request.resource.data, 'family', id)
+        && getAfter(/databases/$(database)/documents/familyRequests/$(id)/characterReferences/$(request.resource.data.firstReferenceId)).data.person.firstName.size() > 0;
+      allow update: if false;
+      allow delete: if false;
+      match /{people}/{pid} {
+        function family() { return get(/databases/$(database)/documents/familyRequests/$(id)).data; }
+        allow read: if people in ['children', 'characterReferences'] && (worker() || (resident() && family().ownerUid == request.auth.uid));
+        allow create: if people in ['children', 'characterReferences'] && resident() && validPersonRow(request.resource.data)
+          && request.resource.data.createdAt == request.time && request.resource.data.legacyId == null
+          && !exists(/databases/$(database)/documents/familyRequests/$(id))
+          && getAfter(/databases/$(database)/documents/familyRequests/$(id)).data.ownerUid == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+    match /staffRequests/{id} {
+      allow read: if admin() || (active() && owner(resource.data.ownerUid));
+      allow create: if ident(id) && createRequest(request.resource.data, 'staff', id);
+      allow update: if false;
+      allow delete: if false;
+    }
+    match /deletionRequests/{id} {
+      allow read: if worker();
+      allow create: if ident(id) && createRequest(request.resource.data, 'deletion', id)
+        && request.resource.data.proposed.residentNumber == get(userPath(request.resource.data.ownerUid)).data.identifier
+        && request.resource.data.proposed.residentName == get(userPath(request.resource.data.ownerUid)).data.displayName;
+      allow update: if false;
+      allow delete: if false;
+    }
+    match /pendingRequests/{id} {
+      function validPointer(d) {
+        return fields(d, ['ownerUid', 'kind', 'requestId']) && ident(d.ownerUid) && ident(d.requestId)
+          && d.kind in ['nameAddress', 'family', 'staff', 'deletion'] && id == d.ownerUid + '_' + d.kind;
+      }
+      // A missing own slot must be readable as NOT_FOUND rather than denied.
+      allow read: if worker() || (active() && id in [request.auth.uid + '_nameAddress', request.auth.uid + '_family',
+        request.auth.uid + '_staff', request.auth.uid + '_deletion']);
+      allow create: if validPointer(request.resource.data)
+        && requester(getAfter(requestPath(request.resource.data.kind, request.resource.data.requestId)).data)
+        && getAfter(requestPath(request.resource.data.kind, request.resource.data.requestId)).data.status == 'pending'
+        && getAfter(requestPath(request.resource.data.kind, request.resource.data.requestId)).data.ownerUid == request.resource.data.ownerUid;
+      allow update: if false;
+      allow delete: if false;
+    }
+    match /residencyRecords/{id} {
+      allow read: if admin();
+      allow create: if false;
+      allow update: if false;
+      allow delete: if false;
+    }
+    match /loginHistory/{id} { allow read: if admin(); allow write: if false; }
+    match /identifierAliases/{id} { allow read, write: if false; }
+    match /{path=**} { allow read, write: if false; }
+  }
+}
