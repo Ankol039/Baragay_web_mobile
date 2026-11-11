@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "barangay-survey-api",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-11",
+  "workers_dev": true,
+  "vars": {
+    "FIREBASE_PROJECT_ID": "barangay-survey-1cc7d",
+    "ALLOWED_ORIGINS": "https://barangay-survey-1cc7d.web.app,https://barangay-survey-1cc7d.firebaseapp.com",
+    "BSS_USE_EMULATORS": "false"
+  }
+}

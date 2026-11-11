@@ -1,0 +1,14 @@
+{
+  "name": "barangay-survey-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --config wrangler.jsonc --var BSS_USE_EMULATORS:true --var FIREBASE_AUTH_EMULATOR_HOST:127.0.0.1:9099 --var FIRESTORE_EMULATOR_HOST:127.0.0.1:8080 --var ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173,http://localhost:8788,http://127.0.0.1:8788",
+    "deploy": "wrangler deploy --config wrangler.jsonc",
+    "typecheck": "node scripts/check-syntax.mjs",
+    "test:emulator": "node tests/worker-emulator-smoke.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.50.0"
+  }
+}
